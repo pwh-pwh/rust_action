@@ -1,4 +1,6 @@
-use std::env::args;
+use crate::analyzer::analyze_program;
+use crate::symbol_table::SymbolTable;
+use std::env::{args, var};
 use std::fs;
 
 fn main() {
@@ -25,7 +27,18 @@ fn process_file(path: &str) {
                     eprintln!("Invalid remaining code in {}", trimmed_rest);
                     return;
                 }
-                println!("Parsed program: {:#?}", parsed_program = syntax_tree);
+                let parsed_program = syntax_tree;
+                let mut variables = SymbolTable::new();
+                match analyze_program(&mut variables, &parsed_program) {
+                    Ok(analyzed_tree) => {
+                        println!("Symbol table:{variables:?}");
+                        println!("analyzed program:{analyzed_tree:#?}");
+                    }
+                    Err(err) => {
+                        eprintln!("invalid code in {}", err);
+                        return;
+                    }
+                }
             }
             Err(err) => {
                 eprintln!("Invalid code in : {:?}", err);
@@ -178,5 +191,154 @@ mod parser {
                 parse_assignment,
             )),
         ))(input)
+    }
+}
+
+mod symbol_table {
+
+    #[derive(Debug)]
+    pub struct SymbolTable {
+        entries: Vec<(String, f64)>,
+    }
+
+    impl SymbolTable {
+        pub fn new() -> Self {
+            Self {
+                entries: Default::default(),
+            }
+        }
+
+        pub fn insert_symbol(&mut self, identifier: &str) -> Result<usize, String> {
+            if self
+                .entries
+                .iter()
+                .find(|(item, _)| item == identifier)
+                .is_some()
+            {
+                Err(format!(
+                    "Error:Identifier{} declared serveral times",
+                    identifier
+                ))
+            } else {
+                self.entries.push((identifier.to_string(), 0.0));
+                Ok(self.entries.len())
+            }
+        }
+        pub fn find_symbol(&self, identifier: &str) -> Result<usize, String> {
+            if let Some(pos) = self.entries.iter().position(|(item, _)| item == identifier) {
+                Ok(pos)
+            } else {
+                Err(format!(
+                    "Error:Identifier {} used before having been declared",
+                    identifier
+                ))
+            }
+        }
+    }
+}
+
+mod analyzer {
+    use crate::parser::{
+        ExprOperator, ParsedExpr, ParsedFactor, ParsedProgram, ParsedStatement, ParsedTerm,
+        TermOperator,
+    };
+    use crate::symbol_table::SymbolTable;
+
+    #[derive(Debug, PartialEq)]
+    pub enum AnalyzedFactor {
+        Literal(f64),
+        Identifier(usize),
+        SubExpression(Box<AnalyzedExpr>),
+    }
+
+    pub type AnalyzedTerm = (AnalyzedFactor, Vec<(TermOperator, AnalyzedFactor)>);
+
+    pub type AnalyzedExpr = (AnalyzedTerm, Vec<(ExprOperator, AnalyzedTerm)>);
+
+    #[derive(Debug)]
+    pub enum AnalyzedStatement {
+        Declaration(usize),
+        InputOperation(usize),
+        OutputOperation(AnalyzedExpr),
+        Assignment(usize, AnalyzedExpr),
+    }
+
+    pub type AnalyzedProgram = Vec<AnalyzedStatement>;
+
+    pub fn analyze_program(
+        variables: &mut SymbolTable,
+        parsed_program: &ParsedProgram,
+    ) -> Result<AnalyzedProgram, String> {
+        let mut analyzed_program = AnalyzedProgram::new();
+        for statement in parsed_program {
+            analyzed_program.push(analyze_statement(variables, statement)?);
+        }
+        Ok(analyzed_program)
+    }
+
+    fn analyze_factor(
+        variables: &mut SymbolTable,
+        parsed_factor: &ParsedFactor,
+    ) -> Result<AnalyzedFactor, String> {
+        match parsed_factor {
+            ParsedFactor::Literal(value) => Ok(AnalyzedFactor::Literal(*value)),
+            ParsedFactor::Identifier(name) => {
+                Ok(AnalyzedFactor::Identifier(variables.find_symbol(name)?))
+            }
+            ParsedFactor::SubExpression(expr) => {
+                Ok(AnalyzedFactor::SubExpression(Box::<AnalyzedExpr>::new(
+                    analyze_expr(variables, expr)?,
+                )))
+            }
+        }
+    }
+
+    fn analyze_term(
+        variables: &mut SymbolTable,
+        parsed_term: &ParsedTerm,
+    ) -> Result<AnalyzedTerm, String> {
+        let first_factor = analyze_factor(variables, &parsed_term.0)?;
+        let mut other_factors = Vec::<(TermOperator, AnalyzedFactor)>::new();
+        for factor in &parsed_term.1 {
+            other_factors.push((factor.0, analyze_factor(variables, &factor.1)?));
+        }
+        Ok((first_factor, other_factors))
+    }
+
+    fn analyze_expr(
+        variables: &mut SymbolTable,
+        parsed_expr: &ParsedExpr,
+    ) -> Result<AnalyzedExpr, String> {
+        let first_term = analyze_term(variables, &parsed_expr.0)?;
+        let mut other_terms = Vec::<(ExprOperator, AnalyzedTerm)>::new();
+        for term in &parsed_expr.1 {
+            other_terms.push((term.0, analyze_term(variables, &term.1)?));
+        }
+        Ok((first_term, other_terms))
+    }
+
+    fn analyze_statement(
+        variables: &mut SymbolTable,
+        parsed_statement: &ParsedStatement,
+    ) -> Result<AnalyzedStatement, String> {
+        match parsed_statement {
+            ParsedStatement::Assignment(identifier, expr) => {
+                let handle = variables.find_symbol(identifier)?;
+                let analyzed_expr = analyze_expr(variables, expr)?;
+                Ok(AnalyzedStatement::Assignment(handle, analyzed_expr))
+            }
+            ParsedStatement::Declaration(identifier) => {
+                let handle = variables.insert_symbol(identifier)?;
+                Ok(AnalyzedStatement::Declaration(handle))
+            }
+            ParsedStatement::InputOperation(identifier) => {
+                let handle = variables.find_symbol(identifier)?;
+                Ok(AnalyzedStatement::InputOperation(handle))
+            }
+            ParsedStatement::OutputOperation(expr) => {
+                let analyzed_expr = analyze_expr(variables, expr)?;
+                Ok(AnalyzedStatement::OutputOperation(analyzed_expr))
+            }
+        }
     }
 }
